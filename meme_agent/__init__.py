@@ -18,6 +18,6 @@ Meme Agent Package
 A multi-agent service for generating memes based on user prompts using Google ADK.
 """
 
-from .agent import create_meme, generate_meme, root_agent
+from .meme_refiner.pipeline import create_meme, generate_meme
 
-__all__ = ['create_meme', 'generate_meme', 'root_agent']
+__all__ = ['create_meme', 'generate_meme']

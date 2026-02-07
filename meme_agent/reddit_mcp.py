@@ -6,14 +6,19 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from mcp.server.fastmcp import FastMCP
 
+# Support --quiet flag to suppress noisy logs when running as subprocess
+quiet_mode = '--quiet' in sys.argv
+log_level = logging.WARNING if quiet_mode else logging.DEBUG
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=log_level,
     format='[%(levelname)s] reddit_mcp: %(message)s',
     stream=sys.stderr
 )
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("RedditMiner")
+
 
 def search_reddit(topic: str):
     """Searches for the top reddit thread for a topic."""
