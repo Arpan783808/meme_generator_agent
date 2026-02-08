@@ -1,25 +1,12 @@
-# Copyright 2025 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 """
-Meme generation pipeline with human-in-the-loop validation.
+Meme generation pipeline with human-in-the-loop validation and feedback loop.
 
-Uses ADK's LongRunningFunctionTool pattern:
-- MemeGenerator calls get_approval tool after generating meme
-- Tool returns "pending" while waiting for human input
-- Event loop detects long-running function and prompts human
-- Human response is sent back to continue the workflow
+Architecture:
+- Python while loop controls retry on rejection
+- SequentialAgent: DataGatherer → MemeCreator → MemeGenerator → ApprovalGateway
+- ApprovalGateway uses LongRunningFunctionTool for human approval
+- On rejection: collect feedback, update state["refined_prompt"], retry
+- On approval: exit loop
 """
 
 import asyncio
@@ -43,15 +30,15 @@ from google.genai import types
 from mcp import StdioServerParameters
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
+from google.adk.sessions import DatabaseSessionService
 
 from meme_agent.meme_refiner.agents import (
     create_data_gatherer,
     create_meme_creator,
+    create_approval_gateway,
 )
 from meme_agent.meme_refiner.prompts import MEME_GENERATOR_INSTRUCTION
 
-# Suppress noisy logs
 logging.getLogger("reddit_mcp").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -61,11 +48,12 @@ warnings.filterwarnings("ignore", category=UserWarning)
 load_dotenv()
 console = Console()
 
-# Model configuration
 COHERE_MODEL = "command-a-03-2025"
+GEMINI_MODEL = "gemini-2.5-flash"
 USER_ID = "user1"
 EVENT_COUNT = 0
-
+MAX_ITERATIONS = 5
+DB_URL = os.getenv("DATABASE_URL")
 
 def log_event(event: Event, phase: str = ""):
     """Pretty print an event with full details."""
@@ -75,22 +63,18 @@ def log_event(event: Event, phase: str = ""):
     author = event.author or "System"
     phase_str = f"[{phase}]" if phase else ""
     
-    # Header line
     console.print(f"\n[bold cyan]━━━ Event #{EVENT_COUNT:03d} {phase_str} ━━━[/bold cyan]")
     console.print(f"[bold]Author:[/bold] {author}")
     
-    # Check for long-running tool
     if event.long_running_tool_ids:
         console.print(f"[bold magenta]⏳ LONG_RUNNING_TOOL detected[/bold magenta]")
         console.print(f"   tool_ids: {event.long_running_tool_ids}")
-    
-    # Check for final response
+
     if hasattr(event, 'is_final_response') and event.is_final_response:
         console.print(f"[bold green]🏁 FINAL_RESPONSE[/bold green]")
-    
-    # Process content parts
+
     if event.content and event.content.parts:
-        for i, part in enumerate(event.content.parts):
+        for part in event.content.parts:
             if hasattr(part, 'function_call') and part.function_call:
                 fc = part.function_call
                 console.print(f"[bold yellow]📞 FUNCTION_CALL[/bold yellow]")
@@ -108,7 +92,6 @@ def log_event(event: Event, phase: str = ""):
             
             elif hasattr(part, 'text') and part.text:
                 console.print(f"[bold white]💬 TEXT OUTPUT[/bold white]")
-                # Show full text with nice formatting
                 text = part.text.strip()
                 if len(text) > 500:
                     console.print(Panel(text[:500] + "...[truncated]", border_style="dim"))
@@ -117,7 +100,7 @@ def log_event(event: Event, phase: str = ""):
 
 
 def generate_imgflip_meme(template_id: int, top_text: str, bottom_text: str) -> dict:
-    """Generates a meme using the Imgflip API directly."""
+    """Generates a meme using the Imgflip API."""
     imgflip_user = os.getenv('IMGFLIP_USERNAME', '')
     imgflip_pass = os.getenv('IMGFLIP_PASSWORD', '')
     
@@ -145,8 +128,15 @@ def generate_imgflip_meme(template_id: int, top_text: str, bottom_text: str) -> 
         return {"success": False, "url": None, "error": str(e)}
 
 
-def get_approval(meme_url: str, tool_context: ToolContext) -> dict:
-    """Long-running function that requests human approval for the meme."""
+def ask_approval(meme_url: str, tool_context: ToolContext) -> dict:
+    """
+    Long-running function that requests human approval and collects feedback on rejection.
+    
+    Returns:
+        - {"status": "pending"} on first call
+        - {"status": "approved", "meme_url": ...} if approved
+        - {"status": "rejected", "feedback": ...} if rejected with feedback
+    """
     if not tool_context.tool_confirmation:
         console.print("\n[bold yellow]⏸️  PIPELINE PAUSED - Requesting human confirmation[/bold yellow]")
         console.print(Panel(
@@ -164,10 +154,12 @@ def get_approval(meme_url: str, tool_context: ToolContext) -> dict:
     # Resume - confirmation received
     if tool_context.tool_confirmation.confirmed:
         console.print("[bold green]✅ Meme approved by human![/bold green]")
-        return {"status": "approved", "meme_url": meme_url, "message": "Meme approved"}
+        return {"status": "approved", "meme_url": meme_url}
     else:
-        console.print("[bold red]❌ Meme rejected by human![/bold red]")
-        return {"status": "rejected", "message": "Meme rejected"}
+        # Rejected - feedback is in payload
+        feedback = tool_context.tool_confirmation.payload.get("feedback", "")
+        console.print(f"[bold red]❌ Meme rejected! Feedback: {feedback}[/bold red]")
+        return {"status": "rejected", "feedback": feedback}
 
 
 def get_long_running_function_call(event: Event) -> types.FunctionCall | None:
@@ -191,11 +183,15 @@ def get_function_response(event: Event, function_call_id: str) -> types.Function
 
 
 async def generate_meme(user_prompt: str) -> dict[str, Any]:
-    """Generate a meme with human-in-the-loop validation."""
-    global EVENT_COUNT
-    EVENT_COUNT = 0
+    """
+    Generate a meme with human-in-the-loop validation and feedback loop.
     
-    # Suppress MCP subprocess output
+    Uses Python while loop for retry:
+    - On approval: exit loop
+    - On rejection: collect feedback, update refined_prompt, retry
+    """
+    global EVENT_COUNT
+    
     server_params = StdioServerParameters(
         command="python3",
         args=["meme_agent/reddit_mcp.py", "--quiet"], 
@@ -203,8 +199,8 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
     )
 
     console.print("[bold cyan]━━━ MEME GENERATION PIPELINE ━━━[/bold cyan]\n")
+    console.print(f"[dim]Max iterations: {MAX_ITERATIONS}[/dim]")
     
-    # Initialize Reddit MCP Toolset
     console.print("[dim]Connecting to Reddit MCP...[/dim]")
     reddit_toolset = McpToolset(
         connection_params=StdioConnectionParams(
@@ -221,7 +217,7 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
     
     # Create tools
     meme_tool = FunctionTool(func=generate_imgflip_meme)
-    approval_tool = LongRunningFunctionTool(func=get_approval)
+    approval_tool = LongRunningFunctionTool(func=ask_approval)
     
     # Create agents
     data_gatherer = create_data_gatherer(reddit_toolset)
@@ -230,108 +226,208 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
         model=LiteLlm(model=COHERE_MODEL),
         name="MemeGenerator",
         instruction=MEME_GENERATOR_INSTRUCTION,
-        tools=[meme_tool, approval_tool],
+        tools=[meme_tool],
         output_key="meme_url"
     )
+    approval_gateway = create_approval_gateway(approval_tool)
     
     pipeline = SequentialAgent(
         name="MemeGeneratorPipeline",
-        sub_agents=[data_gatherer, meme_creator, meme_generator],
-        description="Three-stage pipeline with human approval"
+        sub_agents=[data_gatherer, meme_creator, meme_generator, approval_gateway],
+        description="Four-stage pipeline with human approval gateway"
     )
 
-    session_service = InMemorySessionService()
+    # Use InMemorySessionService for reliability (DB can have transient connection issues)
+    # Toggle to DatabaseSessionService for production persistence
+    if DB_URL:
+        try:
+            session_service = DatabaseSessionService(db_url=DB_URL)
+            console.print("[green]✓[/green] Using DatabaseSessionService")
+        except Exception as e:
+            console.print(f"[yellow]⚠ DB connection failed, falling back to InMemory: {e}[/yellow]")
+            session_service = InMemorySessionService()
+    else:
+        session_service = InMemorySessionService()
+        console.print("[dim]Using InMemorySessionService[/dim]")
     runner = Runner(
         app_name='meme_agent',
         agent=pipeline,
         session_service=session_service,
     )
-    
-    session = await session_service.create_session(
-        app_name='meme_agent',
-        user_id=USER_ID,
-        state={},
-    )
 
     console.print(f"\n[bold]Topic:[/bold] {user_prompt}")
-    console.print("[dim]Pipeline: DataGatherer → MemeCreator → MemeGenerator[/dim]")
-    console.print("\n[bold cyan]━━━ PHASE 1: Initial Run ━━━[/bold cyan]\n")
+    console.print("[dim]Pipeline: DataGatherer → MemeCreator → MemeGenerator → ApprovalGateway[/dim]")
     
+    # Initialize structured iteration context
+    iteration_context = {
+        "initial_prompt": user_prompt,
+        "iterations": []  # Will contain meme_spec and human_feedback for each rejected iteration
+    }
+    approved = False
     final_output = ""
-    long_running_function_call = None
-    long_running_function_response = None
+    iteration = 0
+    current_meme_spec = None  # Captured from MemeCreator output
+    current_meme_url = None   # Captured from MemeGenerator output
     
-    # Phase 1: Run until we hit the long-running function
-    async for event in runner.run_async(
-        session_id=session.id,
-        user_id=USER_ID,
-        new_message=types.Content(role="user", parts=[types.Part(text=user_prompt)])
-    ):
-        log_event(event, "PHASE1")
+    session = await session_service.create_session(
+            app_name='meme_agent',
+            user_id=USER_ID,
+            state={"iteration_context": iteration_context},
+    )
+
+    # ━━━ RETRY LOOP ━━━
+    while not approved and iteration < MAX_ITERATIONS:
+        iteration += 1
+        EVENT_COUNT = 0
+        current_meme_spec = None
+        current_meme_url = None
         
-        # Check for long-running function call
-        if not long_running_function_call:
-            lrf = get_long_running_function_call(event)
-            if lrf:
-                long_running_function_call = lrf
-                console.print(f"\n[bold magenta]🔍 Detected long-running call: id={lrf.id[:12]}...[/bold magenta]")
-        else:
-            _potential_response = get_function_response(event, long_running_function_call.id)
-            if _potential_response:
-                long_running_function_response = _potential_response
-                console.print(f"[bold magenta]📦 Captured pending response: status={_potential_response.response.get('status')}[/bold magenta]")
+        console.print(f"\n[bold magenta]{'━' * 50}[/bold magenta]")
+        console.print(f"[bold magenta]   ITERATION {iteration}/{MAX_ITERATIONS}[/bold magenta]")
+        console.print(f"[bold magenta]{'━' * 50}[/bold magenta]")
+        console.print(f"[bold]Initial prompt:[/bold] {user_prompt}")
+        if iteration_context["iterations"]:
+            console.print(f"[bold yellow]Previous iterations:[/bold yellow] {len(iteration_context['iterations'])}")
+            for prev in iteration_context["iterations"]:
+                console.print(f"  - Iter {prev['iteration']}: {prev['meme_spec'].get('template_name', 'unknown')} → Feedback: {prev['human_feedback']}")
         
-        # Capture final response text
-        if hasattr(event, 'is_final_response') and event.is_final_response and event.content:
-            for part in event.content.parts:
-                if hasattr(part, 'text') and part.text:
-                    final_output = part.text
-    
-    # Phase 2: Human interaction
-    if long_running_function_response:
-        console.print("\n[bold cyan]━━━ PHASE 2: Human Decision ━━━[/bold cyan]")
-        console.print(f"[dim]Function call ID: {long_running_function_call.id}[/dim]")
-        console.print(f"[dim]Current status: {long_running_function_response.response.get('status')}[/dim]\n")
+        long_running_function_call = None
+        long_running_function_response = None
         
-        console.print("[bold]Approve this meme? (yes/no):[/bold] ", end="")
-        user_input = input().strip().lower()
-        approved = user_input in ['yes', 'y', 'approve', 'ok']
+        console.print(f"\n[bold cyan]━━━ PHASE 1: Pipeline Execution ━━━[/bold cyan]\n")
         
-        console.print(f"\n[bold cyan]━━━ PHASE 3: Resume Pipeline ━━━[/bold cyan]")
-        console.print(f"[bold]Sending response:[/bold] confirmed={approved}")
-        console.print(f"[dim]Using same function ID: {long_running_function_call.id[:12]}...[/dim]\n")
+        # Update session state with current iteration_context
+        session.state["iteration_context"] = iteration_context
         
-        # Create updated response with SAME ID
-        updated_response = long_running_function_response.model_copy(deep=True)
-        updated_response.response = {'status': 'approved' if approved else 'rejected'}
-        
-        # Resume the pipeline
-        console.print("[bold yellow]▶️  PIPELINE RESUMED[/bold yellow]\n")
-        
+        # Run pipeline - pass the initial prompt (agents read context from state)
         async for event in runner.run_async(
             session_id=session.id,
             user_id=USER_ID,
-            new_message=types.Content(
-                parts=[types.Part(function_response=updated_response)],
-                role='user'
-            )
+            new_message=types.Content(role="user", parts=[types.Part(text=user_prompt)])
         ):
-            log_event(event, "PHASE3")
+            log_event(event, "RUN")
+            
+            # Capture meme_spec from MemeCreator output (it's a JSON in text)
+            if hasattr(event, 'author') and event.author == 'MemeCreator':
+                if hasattr(event, 'content') and event.content:
+                    for part in event.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            try:
+                                import json
+                                # Try to parse JSON from the output
+                                text = part.text.strip()
+                                if text.startswith('```json'):
+                                    text = text[7:]
+                                if text.startswith('```'):
+                                    text = text[3:]
+                                if text.endswith('```'):
+                                    text = text[:-3]
+                                current_meme_spec = json.loads(text.strip())
+                            except (json.JSONDecodeError, Exception):
+                                pass  # Not JSON, skip
+            
+            # Capture meme_url from generate_imgflip_meme response
+            if hasattr(event, 'content') and event.content:
+                for part in event.content.parts:
+                    if hasattr(part, 'function_response') and part.function_response:
+                        if part.function_response.name == 'generate_imgflip_meme':
+                            resp = part.function_response.response
+                            if resp and resp.get('success') and resp.get('url'):
+                                current_meme_url = resp['url']
+            
+            # Detect long-running function call
+            if not long_running_function_call:
+                lrf = get_long_running_function_call(event)
+                if lrf:
+                    long_running_function_call = lrf
+                    console.print(f"\n[bold magenta]🔍 Detected long-running call: id={lrf.id[:12]}...[/bold magenta]")
+            else:
+                _potential_response = get_function_response(event, long_running_function_call.id)
+                if _potential_response:
+                    long_running_function_response = _potential_response
+                    console.print(f"[bold magenta]📦 Captured pending response: status={_potential_response.response.get('status')}[/bold magenta]")
             
             if hasattr(event, 'is_final_response') and event.is_final_response and event.content:
                 for part in event.content.parts:
                     if hasattr(part, 'text') and part.text:
                         final_output = part.text
+        
+        # Handle human interaction
+        if long_running_function_response:
+            console.print(f"\n[bold cyan]━━━ PHASE 2: Human Decision ━━━[/bold cyan]")
+            console.print(f"[dim]Function call ID: {long_running_function_call.id}[/dim]\n")
+            
+            console.print("[bold]Approve this meme? (yes/no):[/bold] ", end="")
+            user_input = input().strip().lower()
+            
+            if user_input.strip().lower() in ['yes', 'y', 'approve', 'ok']:
+                approved = True
+                feedback = ""
+            else:
+                approved = False
+                console.print("[bold]Please provide feedback to improve the meme:[/bold] ", end="")
+                feedback = input().strip()
+                
+                # Append iteration to history
+                iteration_data = {
+                    "iteration": iteration,
+                    "meme_spec": current_meme_spec or {"error": "Failed to capture meme spec"},
+                    "meme_url": current_meme_url,
+                    "human_feedback": feedback
+                }
+                iteration_context["iterations"].append(iteration_data)
+                
+                console.print(f"\n[bold yellow]📝 Added iteration {iteration} to history[/bold yellow]")
+                console.print(f"[dim]Template: {current_meme_spec.get('template_name', 'unknown') if current_meme_spec else 'N/A'}[/dim]")
+                console.print(f"[dim]Feedback: {feedback}[/dim]")
+            
+            console.print(f"\n[bold cyan]━━━ PHASE 3: Resume Pipeline ━━━[/bold cyan]")
+            console.print(f"[bold]Sending response:[/bold] confirmed={approved}, feedback={feedback}")
+            
+            # Create updated response with SAME ID
+            updated_response = long_running_function_response.model_copy(deep=True)
+            updated_response.response = {
+                'confirmed': approved,
+                'feedback': feedback
+            }
+            
+            console.print("[bold yellow]▶️  PIPELINE RESUMED[/bold yellow]\n")
+            
+            async for event in runner.run_async(
+                session_id=session.id,
+                user_id=USER_ID,
+                new_message=types.Content(
+                    parts=[types.Part(function_response=updated_response)],
+                    role='user'
+                )
+            ):
+                log_event(event, "RESUME")
+                
+                if hasattr(event, 'is_final_response') and event.is_final_response and event.content:
+                    for part in event.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            final_output = part.text
+            
+            if approved:
+                console.print("\n[bold green]✅ MEME APPROVED - Exiting loop[/bold green]")
+            else:
+                console.print(f"\n[bold yellow]❌ MEME REJECTED - Retrying with feedback ({MAX_ITERATIONS - iteration} attempts remaining)[/bold yellow]")
+        else:
+            console.print("[bold red]No approval request detected - something went wrong[/bold red]")
+            break
     
     # Cleanup
     await reddit_toolset.close()
     
     # Summary
-    console.print("\n[bold cyan]━━━ PIPELINE COMPLETE ━━━[/bold cyan]")
-    console.print(f"[bold]Total events processed:[/bold] {EVENT_COUNT}")
+    console.print(f"\n[bold cyan]{'━' * 50}[/bold cyan]")
+    console.print(f"[bold cyan]   PIPELINE COMPLETE[/bold cyan]")
+    console.print(f"[bold cyan]{'━' * 50}[/bold cyan]")
+    console.print(f"[bold]Iterations used:[/bold] {iteration}/{MAX_ITERATIONS}")
+    console.print(f"[bold]Final status:[/bold] {'✅ Approved' if approved else '❌ Rejected (max iterations)'}")
     console.print(f"\n[bold green]Final Output:[/bold green]\n{final_output}")
     
-    return {"result": final_output, "state": {}}
+    return {"result": final_output, "approved": approved, "iterations": iteration}
 
 
 def create_meme(user_prompt: str) -> dict[str, Any]:

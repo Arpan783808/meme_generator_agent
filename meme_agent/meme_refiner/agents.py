@@ -28,6 +28,7 @@ from meme_agent.meme_refiner.prompts import (
     DATA_GATHERER_INSTRUCTION,
     MEME_CREATOR_INSTRUCTION,
     MEME_GENERATOR_INSTRUCTION,
+    APPROVAL_GATEWAY_INSTRUCTION,
 )
 
 
@@ -42,13 +43,7 @@ def create_data_gatherer(reddit_toolset) -> LlmAgent:
     """
     Create the DataGatherer agent.
     
-    This agent gathers Reddit content based on user topics.
-    
-    Args:
-        reddit_toolset: MCP toolset for Reddit mining.
-        
-    Returns:
-        Configured LlmAgent for data gathering.
+    Reads from state["refined_prompt"] to support feedback-driven refinement.
     """
     return LlmAgent(
         model=LiteLlm(model=COHERE_MODEL),
@@ -63,35 +58,45 @@ def create_meme_creator() -> LlmAgent:
     """
     Create the MemeCreator agent.
     
-    This agent analyzes Reddit data and outputs a JSON meme specification.
-    
-    Returns:
-        Configured LlmAgent for meme creation.
+    Analyzes Reddit data and outputs a JSON meme specification.
     """
     return LlmAgent(
-        model=LiteLlm(model=COHERE_MODEL),
+        # model=LiteLlm(model=COHERE_MODEL),
+        model=GEMINI_MODEL,
         name="MemeCreator",
         instruction=MEME_CREATOR_INSTRUCTION,
         output_key="meme_spec"
     )
 
 
-def create_meme_generator(imgflip_toolset) -> LlmAgent:
+def create_meme_generator(tools: list) -> LlmAgent:
     """
     Create the MemeGenerator agent.
     
-    This agent generates the actual meme using the Imgflip API.
-    
-    Args:
-        imgflip_toolset: MCP toolset for Imgflip meme generation.
-        
-    Returns:
-        Configured LlmAgent for meme generation.
+    Generates the actual meme using the Imgflip API.
     """
     return LlmAgent(
         model=LiteLlm(model=COHERE_MODEL),
         name="MemeGenerator",
         instruction=MEME_GENERATOR_INSTRUCTION,
-        tools=[imgflip_toolset],
+        tools=tools,
         output_key="meme_url"
     )
+
+
+def create_approval_gateway(approval_tool) -> LlmAgent:
+    """
+    Create the ApprovalGateway agent.
+    
+    Handles human approval flow:
+    - On approval: signals to exit loop
+    - On rejection: collects feedback for next iteration
+    """
+    return LlmAgent(
+        model=LiteLlm(model=COHERE_MODEL),
+        name="ApprovalGateway",
+        instruction=APPROVAL_GATEWAY_INSTRUCTION,
+        tools=[approval_tool],
+        output_key="approval_result"
+    )
+
