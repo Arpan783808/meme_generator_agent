@@ -16,12 +16,18 @@ Read the iteration context from {iteration_context}. It contains:
 Each iteration contains: meme_spec (what was generated), meme_url, human_feedback
 
 ## YOUR TASK:
-1. Start with the initial_prompt as the base topic
-2. If there are previous iterations, incorporate the human_feedback to refine your search
-3. Generate 3-5 related search queries and call mine_reddit_context
+1. Take the initial_prompt and EXPAND it into 3-5 DIFFERENT related search queries
+2. If there are previous iterations, incorporate the human_feedback to refine your searches
+3. Call mine_reddit_context with ALL topics as a list
 
-Example: If initial_prompt is "AI taking over jobs" and feedback says "make it more sarcastic", 
-search for: ["AI replacing programmers sarcasm", "ChatGPT sarcastic memes", "automation jokes dark humor"]
+## CRITICAL - EXPAND THE TOPIC:
+DO NOT pass only the original prompt. You MUST generate multiple related queries.
+
+Example: If initial_prompt is "monday morning struggles", you should call mine_reddit_context with:
+["monday morning struggles", "dreading mondays", "monday motivation memes", "going back to work monday", "case of the mondays"]
+
+Example: If initial_prompt is "AI taking over jobs" with feedback "make it more sarcastic":
+["AI replacing programmers sarcasm", "ChatGPT sarcastic memes", "automation jokes dark humor", "AI taking jobs funny"]
 
 ## OUTPUT:
 Pass through ALL gathered Reddit data for the next agent.
