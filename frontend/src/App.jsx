@@ -1,15 +1,11 @@
-
-import Home from './pages/home.jsx'
-import { Routes, Route } from 'react-router-dom'
+import Terminal from './components/Terminal';
 
 function App() {
   return (
-    <div>
-      <Routes>
-        <Route path="/" element={<Home />} />
-      </Routes>
+    <div className="min-h-screen flex items-center justify-center">
+      <Terminal />
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
