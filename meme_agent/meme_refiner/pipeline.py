@@ -108,19 +108,17 @@ def _create_pipeline(reddit_toolset):
     return pipeline, approval_tool
 
 
-def _handle_human_decision(
+async def _handle_human_decision(
     long_running_function_call,
     long_running_function_response,
     iteration: int,
     iteration_context: dict,
     current_meme_spec: dict | None,
     current_meme_url: str | None,
+    feedback_handler: Any = None,
 ) -> tuple[bool, str]:
     """
     Handle the human approval/rejection decision.
-    
-    Prompts user for approval, collects feedback on rejection,
-    and updates iteration context.
     
     Args:
         long_running_function_call: The pending function call.
@@ -129,6 +127,7 @@ def _handle_human_decision(
         iteration_context: The iteration history context.
         current_meme_spec: Captured meme specification.
         current_meme_url: Captured meme URL.
+        feedback_handler: Async callback to request feedback from external system.
         
     Returns:
         Tuple of (approved: bool, feedback: str).
@@ -136,15 +135,34 @@ def _handle_human_decision(
     console.print(f"\n[bold cyan]━━━ PHASE 2: Human Decision ━━━[/bold cyan]")
     console.print(f"[dim]Function call ID: {long_running_function_call.id}[/dim]\n")
     
-    console.print("[bold]Approve this meme? (yes/no):[/bold] ", end="")
-    user_input = input().strip().lower()
+    if not feedback_handler:
+        # Fallback meant to be removed, but kept as error handler
+        console.print("[bold red]❌ No feedback handler provided! Cannot proceed in WebSocket mode.[/bold red]")
+        return False, "No feedback handler provided"
+        
+    console.print("[bold yellow]⏳ Waiting for external feedback via WebSocket...[/bold yellow]")
     
-    if user_input in ['yes', 'y', 'approve', 'ok']:
+    # Prepare payload for the handler
+    payload = {
+        "type": "approval_request",
+        "meme_url": current_meme_url,
+        "meme_spec": current_meme_spec,
+        "iteration": iteration,
+        "command_id": long_running_function_call.id
+    }
+    
+    # Await the external decision
+    decision = await feedback_handler(payload)
+    
+    approved = decision.get("approved", "false")
+    feedback = decision.get("feedback", "")
+    
+    if approved=="true":
+        console.print("[bold green]✅ Approved via WebSocket[/bold green]")
         return True, ""
     
     # Rejection flow
-    console.print("[bold]Please provide feedback to improve the meme:[/bold] ", end="")
-    feedback = input().strip()
+    console.print(f"[bold red]❌ Rejected via WebSocket. Feedback: {feedback}[/bold red]")
     
     # Append iteration to history
     iteration_data = {
@@ -155,10 +173,6 @@ def _handle_human_decision(
     }
     iteration_context["iterations"].append(iteration_data)
     
-    console.print(f"\n[bold yellow]📝 Added iteration {iteration} to history[/bold yellow]")
-    console.print(f"[dim]Template: {current_meme_spec.get('template_name', 'unknown') if current_meme_spec else 'N/A'}[/dim]")
-    console.print(f"[dim]Feedback: {feedback}[/dim]")
-    
     return False, feedback
 
 
@@ -167,6 +181,7 @@ async def _run_pipeline_iteration(
     session,
     user_prompt: str,
     iteration_context: dict,
+    feedback_handler: Any = None,
 ) -> tuple:
     """
     Run a single iteration of the pipeline.
@@ -196,17 +211,37 @@ async def _run_pipeline_iteration(
     ):
         log_event(event, "RUN")
         
-        # Capture meme_spec from MemeCreator
+        if feedback_handler:
+            
+            log_msg = ""
+            if event.author=="DataGatherer":
+                log_msg="Exploring Reddit for trends..."
+            elif event.author=="MemeCreator":
+                log_msg="Generating meme specifications"
+            elif event.author=="MemeGenerator":
+                log_msg="Generating meme image"
+            
+            if log_msg:
+               await feedback_handler({
+                   "type": "event_log",
+                   "message": log_msg
+               })
+        
         spec = extract_meme_spec(event)
         if spec:
             current_meme_spec = spec
+            if feedback_handler:
+                await feedback_handler({
+                    "type": "event_log",
+                    "message": "Planning meme specifications..."
+                })
         
-        # Capture meme_url from generate_imgflip_meme response
+        
         url = extract_meme_url(event)
         if url:
             current_meme_url = url
         
-        # Detect long-running function call
+        
         if not long_running_function_call:
             lrf = get_long_running_function_call(event)
             if lrf:
@@ -283,7 +318,7 @@ async def _resume_pipeline(
     return final_output
 
 
-async def generate_meme(user_prompt: str) -> dict[str, Any]:
+async def generate_meme(user_prompt: str, feedback_handler: Any = None) -> dict[str, Any]:
     """
     Generate a meme with human-in-the-loop validation and feedback loop.
     
@@ -293,9 +328,10 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
     
     Args:
         user_prompt: The meme topic/prompt from the user.
+        feedback_handler: Async callback for HITL.
         
     Returns:
-        Dict with 'result', 'approved', and 'iterations' keys.
+        Dict with 'result', 'approved', 'iterations', and 'meme_url' keys.
     """
     server_params = StdioServerParameters(
         command="python3",
@@ -372,17 +408,18 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
             current_meme_spec,
             current_meme_url,
             final_output,
-        ) = await _run_pipeline_iteration(runner, session, user_prompt, iteration_context)
+        ) = await _run_pipeline_iteration(runner, session, user_prompt, iteration_context, feedback_handler)
         
         # Handle human interaction
         if long_running_function_response:
-            approved, feedback = _handle_human_decision(
+            approved, feedback = await _handle_human_decision(
                 long_running_function_call,
                 long_running_function_response,
                 iteration,
                 iteration_context,
                 current_meme_spec,
                 current_meme_url,
+                feedback_handler=feedback_handler,
             )
             
             # Resume pipeline
@@ -413,7 +450,12 @@ async def generate_meme(user_prompt: str) -> dict[str, Any]:
     console.print(f"[bold]Final status:[/bold] {'✅ Approved' if approved else '❌ Rejected (max iterations)'}")
     console.print(f"\n[bold green]Final Output:[/bold green]\n{final_output}")
     
-    return {"result": final_output, "approved": approved, "iterations": iteration}
+    return {
+        "result": final_output,
+        "approved": approved,
+        "iterations": iteration,
+        "meme_url": current_meme_url
+    }
 
 
 def create_meme(user_prompt: str) -> dict[str, Any]:
