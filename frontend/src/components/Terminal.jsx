@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown, Loader2 } from 'lucide-react';
+import ufoIcon from '../assets/ufo.jpeg';
 
 const Terminal = () => {
-  // Chat History: Array of session objects { id, command, logs: [], isExpanded: boolean }
   const [sessions, setSessions] = useState([]);
-  
-  // Input states
   const [input, setInput] = useState('');
+  const [cursorLeft, setCursorLeft] = useState(0);
+  const [isFocused, setIsFocused] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [awaitingFeedback, setAwaitingFeedback] = useState(false);
@@ -16,6 +16,7 @@ const Terminal = () => {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const terminalRef = useRef(null);
+  const measureRef = useRef(null);
 
   const scrollToBottom = (force = false) => {
     if (force) {
@@ -40,13 +41,23 @@ const Terminal = () => {
   }, [sessions, awaitingApproval, awaitingFeedback]);
 
   useEffect(() => {
-    const focusInput = () => inputRef.current?.focus();
-    focusInput();
-    document.addEventListener('click', focusInput);
-    return () => document.removeEventListener('click', focusInput);
+    inputRef.current?.focus();
   }, []);
 
-  // Helper to add log to the LATEST session
+  const updateCursorPosition = () => {
+    if (inputRef.current && measureRef.current) {
+        const { selectionStart } = inputRef.current;
+        const textBeforeCaret = input.slice(0, selectionStart);
+        measureRef.current.textContent = textBeforeCaret;
+        
+        // The span puts text in, we measure its width.
+        // We use a non-breaking space if text is empty to ensure height is correct, but for width 0 is fine.
+        // However, spaces at the end of textContent might not render width correctly unless pre-wrap is used.
+        // In the render below, we use 'whitespace-pre'.
+        setCursorLeft(measureRef.current.offsetWidth);
+    }
+  };
+
   const addLog = (type, content) => {
     setSessions(prev => {
       if (prev.length === 0) return prev;
@@ -71,9 +82,13 @@ const Terminal = () => {
 
   const connectWebSocket = (clientId) => {
     return new Promise((resolve, reject) => {
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        resolve();
+        return;
+      }
+      
       const socket = new WebSocket(`ws://localhost:8000/ws/${clientId}`);
 
-      // Set a connection timeout to prevent indefinite hanging
       const timeout = setTimeout(() => {
         if (socket.readyState !== WebSocket.OPEN) {
           socket.close();
@@ -83,7 +98,7 @@ const Terminal = () => {
 
       socket.onopen = () => {
         clearTimeout(timeout);
-        resolve(socket);
+        resolve();
       };
 
       socket.onerror = (error) => {
@@ -111,7 +126,6 @@ const Terminal = () => {
             setCurrentCommandId(data.command_id);
             setIsProcessing(false);
             
-            // Ensure the current session is expanded
             setSessions(prev => {
                 const newSessions = [...prev];
                 if (newSessions.length > 0) {
@@ -153,16 +167,16 @@ const Terminal = () => {
   };
 
   const handleCommand = async (cmd) => {
-    // Step 2: Feedback Submission
     if (awaitingFeedback) {
         setInput('');
+        setCursorLeft(0);
         sendApproval(false, cmd); 
         return;
     }
 
-    // Step 1: Approval Check
     if (awaitingApproval) {
       setInput('');
+      setCursorLeft(0);
       const lowerCmd = cmd.toLowerCase().trim();
       
       if (lowerCmd === 'y' || lowerCmd === 'yes') {
@@ -178,7 +192,6 @@ const Terminal = () => {
       return;
     }
 
-    // Initial Prompt Submission -> START NEW SESSION
     const newSessionId = Date.now();
     setSessions(prev => [
         ...prev, 
@@ -190,17 +203,15 @@ const Terminal = () => {
         }
     ]);
     
-    setInput('');        
+    setInput('');
+    setCursorLeft(0);        
     setIsProcessing(true);
 
     const clientId = generateClientId();
     
     try {
       addLog('text', 'Initializing Sequence...');
-      // 1. Establish WS Connection FIRST
       await connectWebSocket(clientId);
-
-      // 2. Send API Request
       const response = await fetch('http://localhost:8000/generate-meme', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -244,6 +255,23 @@ const Terminal = () => {
     }
   };
 
+  const handleInputChange = (e) => {
+      setInput(e.target.value);
+      // We must update cursor after state update; doing it immediately relies on render
+      // But updateCursorPosition relies on state 'input' which is async.
+      // So we rely on useEffect or perform measuring based on event value.
+      // Better: updateCursorPosition uses the inputRef value which is current? 
+      // inputRef.current.value is what the user just typed.
+      // So calling updateCursorPosition immediately is fine if we use the ref.
+      // Actually, standard React pattern: set state, then effect. 
+      // But for smooth cursor, let's call it via requestAnimationFrame or setTimeout(0)
+      requestAnimationFrame(updateCursorPosition);
+  };
+
+  useEffect(() => {
+      updateCursorPosition();
+  }, [input]);
+
   let promptLabel = '$';
   if (awaitingApproval) promptLabel = 'Approve (Y/N) >';
   else if (awaitingFeedback) promptLabel = 'Feedback >';
@@ -251,85 +279,131 @@ const Terminal = () => {
   return (
     <div 
       ref={terminalRef}
-      className="w-[90vw] h-[90vh] p-8 font-mono text-lg leading-relaxed text-terminal-green terminal-glow flex flex-col bg-transparent rounded-lg relative z-20 overflow-y-auto terminal-scrollbar"
+      className="w-[90vw] h-[90vh] font-mono text-lg leading-relaxed text-terminal-green terminal-glow flex flex-col bg-transparent rounded-lg relative z-20 overflow-y-auto terminal-scrollbar"
     >
       
-      {/* 1. Session History (Multiple Boxes) */}
-      <div className="flex flex-col gap-6 pb-4">
+      {/* 0. TERMINAL HEADER */}
+      <div className="w-full border-y border-terminal-green py-4 mb-8 pointer-events-none select-none flex justify-center items-center gap-6">
+          <img 
+            src={ufoIcon} 
+            alt="MEMINI UFO" 
+            className="h-32 object-contain drop-shadow-[0_0_15px_rgba(0,255,65,0.6)] opacity-90 mix-blend-screen"
+          />
+          <h1 className="text-7xl font-bold tracking-[0.3em] text-terminal-green terminal-glow uppercase drop-shadow-lg">
+            MEMEVERSE
+          </h1>
+      </div>
+
+      <div className="flex flex-col gap-6 pb-4 px-8">
         {sessions.map((session, index) => {
-            // Determine visible logs based on expanded state
-            const visibleLogs = session.isExpanded 
-                ? session.logs 
-                : session.logs.length > 0 ? [session.logs[session.logs.length - 1]] : [];
+            const textLogs = session.logs.filter(l => l.type !== 'image');
+            
+            const rawImageLogs = session.logs.filter(l => l.type === 'image');
+            const imageLogs = rawImageLogs.filter((log, index, self) =>
+                index === self.findIndex((t) => t.content === log.content)
+            );
+
+            let visibleTextLogs = textLogs.length > 0 ? [textLogs[textLogs.length - 1]] : [];
+
+            if (isProcessing && index === sessions.length - 1 && visibleTextLogs.length > 0) {
+                visibleTextLogs = [];
+            }
 
             return (
                 <div key={session.id} className="flex flex-col gap-2">
-                    {/* Session Header (Command) */}
+                   
                     <div className="mb-2 pb-2">
-                        <span className="mr-3 text-terminal-green font-bold">$</span>
-                        <span className="text-white opacity-90 font-bold">{session.command}</span>
+                        <span className="mr-3 text-terminal-green font-semibold">$</span>
+                        <span className="text-white opacity-90 font-medium">{session.command}</span>
                     </div>
 
-                    {/* Log Box */}
-                    {session.logs.length > 0 && (
-                        <div className="rounded-lg bg-space-blue/40 border border-white/5 p-4 backdrop-blur-sm shadow-lg transition-all duration-300" style={{ boxShadow: '0 0 10px rgba(0, 0, 0, 0.3)' }}>
-                            <div className="flex items-start">
-                                <button 
-                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggleSession(index); }}
-                                  className="mr-3 mt-1 hover:text-space-cyan transition-colors focus:outline-none cursor-pointer p-1 rounded hover:bg-space-cyan/10 flex-shrink-0"
-                                >
-                                    {session.isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
-                                </button>
-                                
-                                <div className="flex-grow flex flex-col gap-2">
-                                    {visibleLogs.map((item, idx) => (
-                                      <div key={idx} className={`break-words ${item.type === 'text' ? 'text-gray-200' : ''} ${item.type === 'error' ? 'text-red-500 font-bold' : ''}`}>
-                                         {item.type === 'text' && <span className="font-mono text-sm">{item.content}</span>}
-                                         {item.type === 'error' && <span className="font-mono text-sm">❌ {item.content}</span>}
-                                         
-                                         {/* TYPE: IMAGE (Collapsible) */}
-                                         {item.type === 'image' && <MemeImage src={item.content} />}
-                                      </div>
-                                    ))}
-                                    
-                                    {/* Processing Loader - Only for active session */}
-                                    {isProcessing && index === sessions.length - 1 && (
-                                      <div className="flex items-center text-terminal-green mt-2 animate-pulse">
-                                        <Loader2 className="animate-spin mr-2" size={14} />
-                                        <span className="font-mono text-sm">Processing...</span>
-                                      </div>
-                                    )}
+                    {(visibleTextLogs.length > 0 || (isProcessing && index === sessions.length - 1) || imageLogs.length > 0) && (
+                        <div className="flex flex-col gap-2">
+                             {(visibleTextLogs.length > 0 || (isProcessing && index === sessions.length - 1)) && (
+                                <div className="rounded-lg bg-space-blue/40 border border-white/5 p-4 backdrop-blur-sm shadow-lg transition-all duration-300" style={{ boxShadow: '0 0 10px rgba(0, 0, 0, 0.3)' }}>
+                                    <div className="flex items-start">
+                                        
+                                        <div className="flex-grow flex flex-col gap-1 font-mono text-sm">
+                                            {visibleTextLogs.map((item, idx) => (
+                                              <div key={idx} className="break-words">
+                                                 {item.type === 'text' && <span className="text-gray-300">{item.content}</span>}
+                                                 {item.type === 'sys' && <span className="text-gray-500 italic">[SYS] {item.content}</span>}
+                                                 {item.type === 'init' && <span className="text-blue-400">› {item.content}</span>}
+                                                 {item.type === 'success' && <span className="text-terminal-green font-medium">✓ {item.content}</span>}
+                                                 {item.type === 'warning' && <span className="text-yellow-400">⚠ {item.content}</span>}
+                                                 {item.type === 'error' && <span className="text-red-500 font-semibold">❌ {item.content}</span>}
+                                              </div>
+                                            ))}
+                                            
+                                            {isProcessing && index === sessions.length - 1 && (
+                                              <div className="flex items-center text-terminal-green animate-pulse">
+                                                <Loader2 className="animate-spin mr-2" size={14} />
+                                                <span className="font-mono text-sm">
+                                                    {textLogs.length > 0 ? textLogs[textLogs.length - 1].content : 'Processing...'}
+                                                </span>
+                                              </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
+                             )}
+
+                             {imageLogs.map((imgLog, imgIdx) => (
+                                 <MemeImage key={imgIdx} src={imgLog.content} version={imgIdx + 1} />
+                             ))}
                         </div>
                     )}
                 </div>
             );
         })}
         
-        {/* Spacer for scroll */}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* 2. Input Section - Only visible when NOT processing */}
       {!isProcessing && (
-        <div className="flex items-center mt-4 pt-2">
-          <span className="mr-3 text-terminal-green font-bold whitespace-nowrap">
+        <div 
+          className="flex items-center mt-4 pt-2 cursor-text px-8 pb-8"
+          onClick={() => inputRef.current?.focus()}
+        >
+          <span className="mr-3 text-terminal-green font-semibold whitespace-nowrap">
             {promptLabel}
           </span>
-          <div className="relative inline-block min-w-[10px] flex-grow">
-            <span className="whitespace-pre visible text-gray-200">
-              {input}
-              <span className="inline-block w-[10px] h-[1.2em] bg-terminal-green animate-blink align-text-bottom ml-[2px]">&nbsp;</span>
+          <div className="relative inline-block flex-grow min-w-[10px] min-h-[1.5em]">
+            
+             <span className="whitespace-pre text-gray-200 break-all relative z-10 pointer-events-none">
+              {input || '\u00A0'}
             </span>
+
+            {/* The Ghost Measure (Hidden) */}
+            <span 
+                ref={measureRef}
+                className="absolute top-0 left-0 whitespace-pre opacity-0 pointer-events-none -z-10"
+                aria-hidden="true"
+            ></span>
+
+            {/* The Custom Cursor */}
+            {isFocused && (
+                <span 
+                    className="absolute top-[3px] inline-block w-[10px] h-[1.2em] bg-terminal-green animate-blink align-text-bottom ml-[1px]"
+                    style={{ left: cursorLeft }}
+                ></span>
+            )}
+
+            {/* Hidden Input for Logic */}
             <input
               ref={inputRef}
               type="text"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              className="absolute inset-0 w-full h-full opacity-0 border-none outline-none bg-transparent text-transparent caret-transparent"
+              onSelect={updateCursorPosition}
+              onClick={updateCursorPosition}
+              onKeyUp={updateCursorPosition}
+              onFocus={() => setIsFocused(true)}
+              onBlur={() => setIsFocused(false)}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-text text-transparent bg-transparent border-none outline-none"
               autoFocus
+              autoComplete="off"
             />
           </div>
         </div>
@@ -338,8 +412,7 @@ const Terminal = () => {
   );
 };
 
-// Collapsible Image Component
-const MemeImage = ({ src }) => {
+const MemeImage = ({ src, version = 1 }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   return (
@@ -354,8 +427,8 @@ const MemeImage = ({ src }) => {
         <span className="text-space-cyan">
           {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
         </span>
-        <span className="text-space-cyan font-bold text-sm tracking-wide">
-          Meme
+        <span className="text-space-cyan font-medium text-sm tracking-wide">
+          Meme v{version}
         </span>
       </button>
       
