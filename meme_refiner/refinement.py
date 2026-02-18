@@ -19,7 +19,7 @@ if __name__ == '__main__':
         sys.path.insert(0, project_root)
 
 from rich.console import Console
-from .pipeline import create_meme
+from pipeline import create_meme
 
 console = Console()
 

@@ -9,14 +9,14 @@ import os
 
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
-from .config import (
+from config import (
     MODEL_NAME,
     TEMPERATURE,
     ANTHROPIC_MODEL,
     OPENAI_MODEL,
 )
 
-from .prompts import (
+from prompts import (
     DATA_GATHERER_INSTRUCTION,
     MEME_CREATOR_INSTRUCTION,
     MEME_GENERATOR_INSTRUCTION,

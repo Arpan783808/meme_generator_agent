@@ -10,9 +10,9 @@ from typing import Dict, Any, Callable, Awaitable
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from .pipeline import create_meme
+from pipeline import create_meme
 import os
-from .pipeline import generate_meme
+from pipeline import generate_meme
 
 app = FastAPI(title="Meme Generator API", version="1.0.0")
 
@@ -138,7 +138,7 @@ async def generate_meme_endpoint(request: MemeRequest):
         async def bound_handler(payload: dict) -> dict:
             return await _feedback_handler(request.client_id, payload)
 
-        from .pipeline import generate_meme
+        from pipeline import generate_meme
         result = await generate_meme(request.prompt, feedback_handler=bound_handler)
         
         return MemeResponse(
