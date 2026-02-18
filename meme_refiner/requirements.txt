@@ -7,10 +7,9 @@ beautifulsoup4
 requests
 litellm
 cohere
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+asyncpg>=0.29.0
 greenlet
-sqlalchemy==2.0.25
+sqlalchemy>=2.0.25
 fastapi
 uvicorn
 ddgs
