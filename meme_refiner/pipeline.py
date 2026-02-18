@@ -19,7 +19,11 @@ from google.adk.agents import SequentialAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, DatabaseSessionService
 from google.adk.tools import FunctionTool, LongRunningFunctionTool
-from google.adk.tools.mcp_tool import McpToolset
+try:
+    from google.adk.tools.mcp_tool import McpToolset
+except ImportError:
+    from google.adk.tools.mcp_tool import MCPToolset as McpToolset
+
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
@@ -27,26 +31,26 @@ from mcp import StdioServerParameters
 from rich.console import Console
 
 # Local imports from modular structure
-from meme_agent.meme_refiner.config import (
+from .config import (
     MAX_ITERATIONS,
     USER_ID,
     DB_URL,
 )
-from meme_agent.meme_refiner.agents import (
+from .agents import (
     create_data_gatherer,
     create_meme_creator,
     create_meme_generator,
     create_approval_gateway,
 )
-from meme_agent.meme_refiner.tools import ask_approval
-from meme_agent.meme_refiner.logging_utils import log_event, reset_event_count
-from meme_agent.meme_refiner.event_handlers import (
+from .tools import ask_approval
+from .logging_utils import log_event, reset_event_count
+from .event_handlers import (
     get_long_running_function_call,
     get_function_response,
     extract_meme_spec,
     extract_meme_url,
 )
-from meme_agent.meme_refiner.utils import generate_imgflip_meme
+from .utils import generate_imgflip_meme
 
 # Configure logging
 logging.getLogger("reddit_mcp").setLevel(logging.WARNING)
@@ -335,7 +339,7 @@ async def generate_meme(user_prompt: str, feedback_handler: Any = None) -> dict[
     """
     server_params = StdioServerParameters(
         command="python3",
-        args=["meme_agent/reddit_mcp.py", "--quiet"], 
+        args=["meme_refiner/reddit_mcp.py", "--quiet"], 
         env={**os.environ, "PYTHONWARNINGS": "ignore"}
     )
 

@@ -15,6 +15,11 @@ load_dotenv()
 # Model Configuration
 COHERE_MODEL = "command-a-03-2025"
 GEMINI_MODEL = "gemini-2.5-flash"
+ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
+OPENAI_MODEL = "gpt-4o"
+
+MODEL_NAME = GEMINI_MODEL
+TEMPERATURE = 0.7
 
 # Pipeline Settings
 MAX_ITERATIONS = 5

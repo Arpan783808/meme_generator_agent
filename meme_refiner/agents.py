@@ -9,8 +9,14 @@ import os
 
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
+from .config import (
+    MODEL_NAME,
+    TEMPERATURE,
+    ANTHROPIC_MODEL,
+    OPENAI_MODEL,
+)
 
-from meme_agent.meme_refiner.prompts import (
+from .prompts import (
     DATA_GATHERER_INSTRUCTION,
     MEME_CREATOR_INSTRUCTION,
     MEME_GENERATOR_INSTRUCTION,
@@ -32,7 +38,7 @@ def create_data_gatherer(reddit_toolset) -> LlmAgent:
     Reads from state["refined_prompt"] to support feedback-driven refinement.
     """
     return LlmAgent(
-        model=os.getenv("SCRAPER_MODEL",GEMINI_MODEL),
+        model=LiteLlm(model=COHERE_MODEL),
         name="DataGatherer",
         instruction=DATA_GATHERER_INSTRUCTION,
         tools=[reddit_toolset],
@@ -48,7 +54,7 @@ def create_meme_creator() -> LlmAgent:
     """
     return LlmAgent(
         # model=LiteLlm(model=COHERE_MODEL),
-        model=GEMINI_MODEL,
+        model=LiteLlm(model=COHERE_MODEL),
         name="MemeCreator",
         instruction=MEME_CREATOR_INSTRUCTION,
         output_key="meme_spec"
