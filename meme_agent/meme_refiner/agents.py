@@ -32,7 +32,7 @@ def create_data_gatherer(reddit_toolset) -> LlmAgent:
     Reads from state["refined_prompt"] to support feedback-driven refinement.
     """
     return LlmAgent(
-        model=LiteLlm(model=COHERE_MODEL),
+        model=os.getenv("SCRAPER_MODEL",GEMINI_MODEL),
         name="DataGatherer",
         instruction=DATA_GATHERER_INSTRUCTION,
         tools=[reddit_toolset],

@@ -87,7 +87,8 @@ const Terminal = () => {
         return;
       }
       
-      const socket = new WebSocket(`ws://localhost:8000/ws/${clientId}`);
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+      const socket = new WebSocket(`${wsUrl}/ws/${clientId}`);
 
       const timeout = setTimeout(() => {
         if (socket.readyState !== WebSocket.OPEN) {
@@ -212,7 +213,8 @@ const Terminal = () => {
     try {
       addLog('text', 'Initializing Sequence...');
       await connectWebSocket(clientId);
-      const response = await fetch('http://localhost:8000/generate-meme', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${apiUrl}/generate-meme`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: cmd, client_id: clientId }),
