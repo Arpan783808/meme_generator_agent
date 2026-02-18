@@ -12,11 +12,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from meme_agent.meme_refiner.pipeline import create_meme
 
+import os
+
 app = FastAPI(title="Meme Generator API", version="1.0.0")
+
+# Define allowed origins
+# In production, this should be the frontend URL.
+# In development, it defaults to the Vite server.
+origins = [
+    os.getenv("FRONTEND_URL", "http://localhost:5173"),
+    "http://localhost:8000",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
