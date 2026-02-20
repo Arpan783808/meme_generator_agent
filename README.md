@@ -1,71 +1,64 @@
 # Meme Service
 
-A multi-agent meme generation service using the Google Agent Development Kit (ADK), LiteLLM, and custom MCP servers to create memes based on user topics.
+A multi-agent meme generation service using the Google Agent Development Kit (ADK), and a human-in-the-loop (HITL) architecture to refine and perfect generated memes based on user feedback.
 
-This project demonstrates a sophisticated multi-agent pipeline where specialized agents collaborate to turn a simple idea into a finished meme.
+This project demonstrates a sophisticated multi-agent pipeline where specialized agents collaborate to create a meme, and a human reviewer can approve or reject the output to iteratively improve the result.
 
 ## Project Architecture
 
-The service uses a `SequentialAgent` pipeline to orchestrate three distinct agents, each with a specific role. This separation of concerns allows for a more robust and maintainable system.
+The service uses a `SequentialAgent` pipeline to orchestrate four distinct agents, each with a specific role. A human-in-the-loop gateway ensures quality control before finalizing the meme.
 
 ```
-User Prompt (e.g., "AI taking over jobs")
+User Prompt (e.g., "Students finding math hard")
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                   SequentialAgent Pipeline                   │
 ├─────────────────────────────────────────────────────────────┤
-│  1. DataGatherer (Cohere Model)                             │
+│  1. DataGatherer                    │
 │     │                                                       │
-│     └──➔ Calls `mine_reddit_context` tool via MCP           │
-│          (meme_agent/reddit_mcp.py)                         │
-│     │                                                       │
-│     └──➔ Output: Scraped Reddit content ({reddit_data})     │
+│     └──➔ Calls `reddit_mcp.py` to mine Reddit for           │
+│          trending templates and context                     │
 │                                                              │
 ├─────────────────────────────────────────────────────────────┤
-│  2. MemeCreator (Cohere Model)                              │
+│  2. MemeCreator                         │
 │     │                                                       │
-│     └──➔ Input: {reddit_data}                               │
-│     │                                                       │
-│     └──➔ Output: JSON meme specification ({meme_spec})      │
+│     └──➔ Analyzes data and plans the meme format,           │
+│          choosing a template and writing the captions       │
 │                                                              │
 ├─────────────────────────────────────────────────────────────┤
-│  3. MemeGenerator (Cohere Model)                            │
+│  3. MemeGenerator         │
 │     │                                                       │
-│     └──➔ Calls `generate_meme` tool via MCP                 │
-│          (meme_agent/imgflip_mcp.py)                        │
+│     └──➔ Uses the `generate_imgflip_meme` tool to           │
+│          create the final image via the Imgflip API         │
+│                                                              │
+├─────────────────────────────────────────────────────────────┤
+│  4. ApprovalGateway (Gemini Flash Model)                    │
 │     │                                                       │
-│     └──➔ Input: {meme_spec}                                 │
-│     │                                                       │
-│     └──➔ Output: Final meme URL                             │
+│     └──➔ Uses a `LongRunningFunctionTool` to pause          │
+│          execution and ask the human for approval:          │
+│            - ✅ If Approved: Exits loop, returns meme       │
+│            - ❌ If Rejected: Collects feedback, updates     │
+│                 iteration history, and restarts pipeline    │
 └─────────────────────────────────────────────────────────────┘
     │
     ▼
-Final Meme URL (e.g., https://i.imgflip.com/xxxxx.jpg)
+Final Approved Meme URL (e.g., https://i.imgflip.com/xxxxx.jpg)
 ```
 
 ## How It Works
 
-1.  **DataGatherer**: The first agent receives the user's topic. Its job is to brainstorm related search terms and use the custom `reddit_mcp.py` tool to mine Reddit for relevant posts and comments. This raw data provides the context for the meme.
+1.  **DataGatherer**: The first agent receives the user's topic. Its job is to brainstorm related search terms and use the Reddit MCP tool to mine Reddit for relevant posts and comments. This raw data provides the cultural context for the meme.
 
-2.  **MemeCreator**: The second agent receives the raw data from the `DataGatherer`. It analyzes the text to understand the sentiment, key topics, and humor. Based on this analysis, it chooses the most fitting meme template from a predefined list and writes the top and bottom text. Its final output is a structured JSON object.
+2.  **MemeCreator**: The second agent receives the raw data. It analyzes the text to understand the sentiment, key topics, and humor. Based on this analysis, it chooses the most fitting meme template and writes the text. 
 
-    *Example `meme_spec` JSON:*
-    ```json
-    {
-        "meme_template_id": 181913649,
-        "template_name": "Drake Hotline Bling",
-        "top_text": "Writing code from scratch",
-        "bottom_text": "Googling for code snippets"
-    }
-    ```
+3.  **MemeGenerator**: The third agent receives the JSON specification and executes the `generate_imgflip_meme` Python function, which communicates with the Imgflip API to generate the actual meme image. 
 
-3.  **MemeGenerator**: The final agent in the pipeline receives the JSON specification. Its sole purpose is to call the `imgflip_mcp.py` tool, which communicates with the Imgflip API to generate the meme image. It then outputs the final URL.
+4.  **ApprovalGateway**: The final agent in the pipeline acts as a tollbooth. It calls a `LongRunningFunctionTool` that pauses the pipeline and waits for human input (via CLI or WebSocket). If rejected, the feedback is appended to the `iteration_context` and the whole pipeline restarts, allowing the agents to learn from the rejection.
 
 ## Prerequisites
 
-- Python 3.9+
-- An active internet connection
+- Python 3.12+ 
 
 ## Installation & Setup
 
@@ -77,6 +70,11 @@ Final Meme URL (e.g., https://i.imgflip.com/xxxxx.jpg)
 
 2.  **Create and activate a virtual environment:**
     ```bash
+    # Using uv (recommended)
+    uv venv
+    source .venv/bin/activate
+    
+    # OR using standard python
     python3 -m venv venv
     source venv/bin/activate
     ```
@@ -86,44 +84,45 @@ Final Meme URL (e.g., https://i.imgflip.com/xxxxx.jpg)
     pip install -r requirements.txt
     ```
 
+
+
 4.  **Configure Environment Variables:**
 
-    You will need to provide API keys for the services used in this project.
-    Copy the example environment file and rename it to `.env` inside the `meme_agent/` directory:
+    Create a `.env` file in the root directory (or inside `meme_refiner/`):
 
     ```bash
-    cp meme_agent/.env.example meme_agent/.env
+    touch .env
     ```
 
-    Then, open `meme_agent/.env` and fill in your actual API keys and credentials.
+    Fill in your actual API keys and credentials:
 
-    - **Cohere/Google API Key**: Obtain this from the [AI Studio dashboard](https://aistudio.google.com/app/apikey).
-    - **Imgflip Credentials**: Create a free account on [imgflip.com](https://imgflip.com/signup).
+    ```env
+    # Required for the LLM
+    GEMINI_API_KEY=your_gemini_api_key
+    COHERE_API_KEY=your_cohere_api_key
+    
+    # Imgflip Credentials (for generating the meme image)
+    # Create a free account on https://imgflip.com/signup
+    IMGFLIP_USERNAME=your_username
+    IMGFLIP_PASSWORD=your_password
+    
+    # Frontend URL for CORS (if using the web UI)
+    FRONTEND_URL=http://localhost:5173
+    ```
 
 ## Usage
 
-You can run the entire meme generation pipeline from your command line.
+
+### FastAPI WebSocket Server (For Web UI)
+
+To use the service with a frontend application, you can start the FastAPI server which exposes a WebSocket endpoint for real-time streaming and feedback.
 
 ```bash
-# Navigate to the project root
-cd /path/to/meme_service
+# Navigate to the meme_refiner directory
+cd meme_refiner
 
-# Run the agent with your desired meme topic
-python3 meme_agent/agent.py "A funny meme about programmers and coffee"
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-The agent will print its progress, including which agent is running and which tools are being called. The final output will be the URL to the generated meme.
+Then, your frontend can connect to `ws://localhost:8000/ws/{client_id}` to interact with the pipeline.
 
-## Project Structure
-
-```
-meme_service/
-├── meme_agent/
-│   ├── __init__.py         # Package initialization
-│   ├── agent.py            # Main agent orchestration logic (SequentialAgent)
-│   ├── reddit_mcp.py       # MCP server for mining Reddit content
-│   ├── imgflip_mcp.py      # MCP server for generating memes via Imgflip API
-│   └── .env.example        # Example environment file
-├── requirements.txt        # Python dependencies
-└── README.md               # This file
-```

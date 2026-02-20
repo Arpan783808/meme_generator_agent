@@ -111,10 +111,8 @@ async def _feedback_handler(client_id: str, payload: dict) -> dict:
     """
     msg_type = payload.get("type", "approval_request")
 
-    # 1. Send message to client
     await manager.send_personal_message(payload, client_id)
     
-    # 2. If it's just a log, return immediately
     if msg_type == "event_log":
         return {}
     
