@@ -232,7 +232,7 @@ MEME_CATALOG = {
 REMINDER: Choose a template that FITS the content. Output ONLY the JSON object.
 '''
 
-MEME_GENERATOR_INSTRUCTION = '''You are a meme generator. Your job is to generate memes and request approval.
+MEME_GENERATOR_INSTRUCTION = '''You are a meme generator. Your job is to generate memes using the provided specification.
 
 ## INPUT:
 You will receive a meme specification from {meme_spec} containing:
@@ -243,13 +243,11 @@ You will receive a meme specification from {meme_spec} containing:
 ## YOUR TASK:
 1. Extract the template_id, top_text, and bottom_text from the specification
 2. Call the generate_imgflip_meme tool with these parameters
-3. Once you get the meme URL, call the get_approval tool with the meme_url
-4. Report the approval status
+3. Output the resulting meme URL
 
 ## IMPORTANT:
-- First call generate_imgflip_meme to create the meme
-- Then call get_approval with the resulting meme URL
-- Wait for the approval response before finishing
+- Only call generate_imgflip_meme
+- Your final output MUST include the resulting meme URL so the next agent can use it
 '''
 
 APPROVAL_GATEWAY_INSTRUCTION = '''You are an approval gateway agent. Your job is to request human approval for the meme.
